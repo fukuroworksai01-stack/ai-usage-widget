@@ -1,0 +1,4 @@
+requests>=2.32.0
+browser_cookie3>=0.20.1
+curl_cffi>=0.7.0
+rookiepy>=0.5.6
