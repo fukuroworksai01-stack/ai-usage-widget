@@ -11,6 +11,8 @@
 
 > Unofficial desktop widget for checking AI usage limits and remaining credits locally.
 
+Current version: **v1.1.0**
+
 ![AI Usage Widget screenshot](assets/screenshot.png)
 
 スターしておくと、ChatGPT / Claude の利用枠確認ツールをあとからすぐ見つけられます。
@@ -22,6 +24,9 @@
 - Manus / Cursor / v0 など、JSON APIで残量を返すサービスをカスタム追加
 - 残り%とリセットまでの時間をリング表示
 - Windows常駐、ドラッグ移動、リサイズ、表示倍率変更、自動更新
+- 透明度調整、位置ロック、タスクバー最小化、バージョン情報を追加
+- リングにマウスを乗せると正確な数値とリセット時刻をツールチップ表示
+- 一時的な取得失敗時は短い間隔で自動リトライ
 - 取得失敗時も直前の値をキャッシュ表示
 
 ## Why
@@ -35,6 +40,16 @@ AIツールを複数使っていると、利用枠の残量確認だけでブラ
 | ChatGPT / Codex | `~/.codex/auth.json` | Codex CLIでログイン済みなら設定不要 |
 | Claude | `sessionKey` Cookie | 設定画面から自動取得、ログイン取得、手動貼り付け |
 | Custom AI | JSON API | Cookie / Bearer token / custom headerに対応 |
+
+## What's New in v1.1.0
+
+- More modern UI font selection, including Inter and Segoe UI Variable
+- Window opacity slider
+- Lock position option
+- Taskbar-friendly minimize and restore
+- Hover tooltips for exact remaining values and reset times
+- Faster automatic retry after temporary network or Cloudflare failures
+- Bundled icon support for PyInstaller builds
 
 ## Quick Start
 

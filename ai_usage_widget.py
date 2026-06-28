@@ -48,16 +48,53 @@ import tkinter as tk
 import tkinter.font as tkfont
 
 
+# ─────────────── モダンUIフォントの自動採用 ───────────────
+# システムにあれば今時のUIフォントを使う。無ければ Segoe UI にフォールバック。
+_UI_FAMILY = "Segoe UI"
+_UI_PREFS = ["Inter", "Inter Display", "SF Pro Text", "Segoe UI Variable Text",
+             "Segoe UI Variable", "Roboto", "Noto Sans JP", "Segoe UI", "Arial"]
+
+
+def set_ui_family(root):
+    global _UI_FAMILY
+    try:
+        fams = set(str(f) for f in tkfont.families(root))
+        for p in _UI_PREFS:
+            if p in fams:
+                _UI_FAMILY = p
+                return
+    except Exception:
+        pass
+
+
+def UIF():
+    return _UI_FAMILY
+
+
+def resource_path(name):
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        return os.path.join(base, name)
+    try:
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
+    except Exception:
+        return name
+
+
 # ─────────────────────────── 設定 ───────────────────────────
 
 CONFIG_DIR = Path.home() / ".ai-usage-widget"
 CONFIG_PATH = CONFIG_DIR / "config.json"
+
+APP_VERSION = "1.1.0"
 
 DEFAULT_CONFIG = {
     "refresh_minutes": 5,
     "low_threshold_pct": 20,
     "alert_sound": True,
     "ui_scale": 1.0,
+    "opacity": 1.0,
+    "locked": False,
     "window": {"x": None, "y": None},
     "providers": {
         "chatgpt": {"enabled": True, "auth_path": ""},
@@ -508,8 +545,8 @@ def _cookies_from_jar(jar, domain_substr="claude") -> dict:
 
 
 class _ClaudeHttp:
-    """claude.ai 用 HTTP クライアント。curl_cffi があれば Chrome の TLS を偽装し
-    Cloudflare を通りやすくする。無ければ requests にフォールバック。"""
+    """claude.ai 用 HTTP クライアント。curl_cffi があれば Chrome 互換の通信設定を使い、
+    ブラウザに近い通信で取得を試す。無ければ requests にフォールバック。"""
 
     def __init__(self, cookies: dict):
         self.cookies = cookies or {}
@@ -1114,21 +1151,21 @@ def fetch_all(cfg: dict) -> list:
 # ─────────────────────────── 配色(モダンなダーク) ───────────────────────────
 
 TRANSPARENT = "#010203"     # Windows で角丸の外側を透過させる魔法色
-CARD = "#15171c"
-CARD_HEAD = "#1c1f27"
-BORDER = "#2a2f3a"
-DIVIDER = "#23272f"
-PILL_BG = "#262b34"
-TEXT = "#f2f4f7"
-MUTED = "#a7adba"
-FAINT = "#6c7380"
-TRACK = "#262b34"
-FIELD = "#0e1015"
-GREEN = "#43c463"
-AMBER = "#e2b340"
-RED = "#f3603f"
-DOT_CLAUDE = "#d97757"       # Claude 系のクレイ色
-DOT_CHATGPT = "#19c37d"      # ChatGPT 系のグリーン
+CARD = "#131620"
+CARD_HEAD = "#171b27"
+BORDER = "#262b39"
+DIVIDER = "#1e2330"
+PILL_BG = "#212636"
+TEXT = "#f4f6fb"
+MUTED = "#98a1b3"
+FAINT = "#5e6678"
+TRACK = "#222838"
+FIELD = "#0d0f17"
+GREEN = "#34d399"
+AMBER = "#fbbf24"
+RED = "#fb7185"
+DOT_CLAUDE = "#e0805f"       # Claude 系のクレイ色
+DOT_CHATGPT = "#10b981"      # ChatGPT 系のグリーン
 
 
 def _lighten(hexcol, amt=0.25):
@@ -1161,6 +1198,11 @@ class UsageWidget:
         self.cfg = cfg
         self.q = queue.Queue()
         self.fetching = False
+        self._backoff = 0
+        self._retry_after = None
+        self._cells = []
+        self._tip = None
+        self._tip_text = None
         self._drag = {"x": 0, "y": 0}
         self.cache, self.cache_ts = {}, {}
         self._below = set()
@@ -1207,6 +1249,8 @@ class UsageWidget:
                                 bg=win_bg, highlightthickness=0, bd=0)
         self.canvas.pack(fill="both", expand=True)
 
+        set_ui_family(root)
+        self._set_window_icon()
         self._make_fonts()
 
         # 右上のボタン(キャンバス上にオーバーレイ)
@@ -1217,6 +1261,7 @@ class UsageWidget:
         self.canvas.bind("<B1-Motion>", self._drag_move)
         self.canvas.bind("<ButtonRelease-1>", self._drag_end)
         self.canvas.bind("<Motion>", self._on_motion)
+        self.canvas.bind("<Leave>", lambda e: self._hide_tip())
         self.root.bind("<Button-3>", self._show_menu)
         # ホイールでズーム(右下グリップのドラッグでも可)
         self.canvas.bind("<MouseWheel>", self._on_wheel)            # Win/Mac
@@ -1234,35 +1279,78 @@ class UsageWidget:
             x, y = root.winfo_screenwidth() - self.W - self.S(24), self.S(48)
         root.geometry(f"+{int(x)}+{int(y)}")
         self._clamp_position()
+        self._apply_opacity()
 
         self.refresh()
         self.root.after(300, self._poll_queue)
         self._schedule_refresh()
+        self.root.after(60000, self._tick)
+        if os.name == "nt":
+            self.root.after(60, self._enable_taskbar)
+
+    def _set_window_icon(self):
+        # タスクバー/ウィンドウのアイコンに同梱の icon.ico を使う(Tk既定の羽アイコン回避)
+        path = resource_path("icon.ico")
+        try:
+            if os.path.exists(path):
+                self.root.iconbitmap(default=path)
+        except Exception:
+            try:
+                img = tk.PhotoImage(file=resource_path("icon.png"))
+                self.root.iconphoto(True, img)
+                self._iconimg = img
+            except Exception:
+                pass
+
+    def _apply_opacity(self):
+        try:
+            op = float(self.cfg.get("opacity", 1.0))
+        except Exception:
+            op = 1.0
+        op = max(0.4, min(1.0, op))
+        try:
+            # 既定(不透明)のときは設定しない＝角丸の透過(-transparentcolor)を優先
+            if op < 0.999:
+                self.root.attributes("-alpha", op)
+            else:
+                self.root.attributes("-alpha", 1.0)
+        except Exception:
+            pass
+
+    def _tick(self):
+        # リセット残り時間をライブ更新(毎分)
+        try:
+            if hasattr(self, "_last_display") and not self.fetching:
+                self._render(self._last_display)
+        except Exception:
+            pass
+        self.root.after(60000, self._tick)
 
     def S(self, v):
         return int(round(v * self.scale))
 
     def _make_fonts(self):
         # 見やすさ重視のサイズ(負値=ピクセル)。ズームで全体が拡大しても鮮明。
-        self.f_title = tkfont.Font(family="Segoe UI", size=-self.S(14), weight="bold")
-        self.f_prov = tkfont.Font(family="Segoe UI", size=-self.S(13), weight="bold")
-        self.f_win = tkfont.Font(family="Segoe UI", size=-self.S(10))
-        self.f_pct = tkfont.Font(family="Segoe UI Semibold", size=-self.S(13), weight="bold")
-        self.f_small = tkfont.Font(family="Segoe UI", size=-self.S(10))
-        self.f_btn = tkfont.Font(family="Segoe UI", size=-self.S(13))
-        self.f_ring = tkfont.Font(family="Segoe UI Semibold", size=-self.S(13), weight="bold")
-        self.f_ringsub = tkfont.Font(family="Segoe UI", size=-self.S(8))
+        self.f_title = tkfont.Font(family=UIF(), size=-self.S(14), weight="bold")
+        self.f_prov = tkfont.Font(family=UIF(), size=-self.S(13), weight="bold")
+        self.f_win = tkfont.Font(family=UIF(), size=-self.S(10))
+        self.f_pct = tkfont.Font(family=UIF(), size=-self.S(13), weight="bold")
+        self.f_small = tkfont.Font(family=UIF(), size=-self.S(10))
+        self.f_btn = tkfont.Font(family=UIF(), size=-self.S(13))
+        self.f_ring = tkfont.Font(family=UIF(), size=-self.S(13), weight="bold")
+        self.f_ringsub = tkfont.Font(family=UIF(), size=-self.S(8))
 
     # ---------- ボタン ----------
     def _make_buttons(self):
         self.buttons = []
-        specs = [("✕", RED, self.quit), ("⟳", TEXT, self.refresh), ("⚙", TEXT, self.open_settings)]
+        specs = [("✕", RED, self.quit), ("－", TEXT, self.minimize),
+                 ("⟳", TEXT, self.refresh), ("⚙", TEXT, self.open_settings)]
         for text, hover, cmd in specs:
             b = tk.Label(self.canvas, text=text, bg=CARD_HEAD, fg=MUTED,
                          font=self.f_btn, cursor="hand2")
             b.bind("<Button-1>", lambda e, c=cmd: c())
-            b.bind("<Enter>", lambda e, w=b, h=hover: w.config(fg=h))
-            b.bind("<Leave>", lambda e, w=b: w.config(fg=MUTED))
+            b.bind("<Enter>", lambda e, w=b, h=hover: w.config(fg=h, bg=PILL_BG))
+            b.bind("<Leave>", lambda e, w=b: w.config(fg=MUTED, bg=CARD_HEAD))
             self.buttons.append(b)
         self._place_buttons()
 
@@ -1272,6 +1360,59 @@ class UsageWidget:
             x -= self.S(22)
             b.config(font=self.f_btn, bg=CARD_HEAD)
             b.place(x=x, y=self.S(7), width=self.S(20), height=self.S(20))
+
+    # ---------- 最小化 / タスクバー ----------
+    def _hwnd(self):
+        import ctypes
+        wid = self.root.winfo_id()
+        try:
+            parent = ctypes.windll.user32.GetParent(wid)
+            return parent or wid
+        except Exception:
+            return wid
+
+    def _enable_taskbar(self):
+        # 枠なし窓でもタスクバーにボタンを出す(WS_EX_APPWINDOW)。最小化/復元が可能に。
+        if os.name != "nt":
+            return
+        try:
+            import ctypes
+            GWL_EXSTYLE = -20
+            WS_EX_APPWINDOW = 0x00040000
+            WS_EX_TOOLWINDOW = 0x00000080
+            hwnd = self._hwnd()
+            user32 = ctypes.windll.user32
+            getl = user32.GetWindowLongW
+            setl = user32.SetWindowLongW
+            style = getl(hwnd, GWL_EXSTYLE)
+            style = (style & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
+            setl(hwnd, GWL_EXSTYLE, style)
+            # 反映のため再表示
+            self.root.withdraw()
+            self.root.after(10, self._reshow)
+        except Exception:
+            pass
+
+    def _reshow(self):
+        try:
+            self.root.deiconify()
+            self.root.attributes("-topmost", True)
+        except Exception:
+            pass
+
+    def minimize(self):
+        if os.name == "nt":
+            try:
+                import ctypes
+                ctypes.windll.user32.ShowWindow(self._hwnd(), 6)  # SW_MINIMIZE
+                return
+            except Exception:
+                pass
+        try:
+            self.root.overrideredirect(False)
+            self.root.iconify()
+        except Exception:
+            pass
 
     def _apply_scale(self):
         self.scale = self.dpi * self.user_scale
@@ -1300,6 +1441,42 @@ class UsageWidget:
             self.canvas.config(cursor="bottom_right_corner" if self._in_resize_grip(e) else "")
         except Exception:
             pass
+        # リングのセルにホバーしたら正確な数値をツールチップ表示
+        tip = None
+        for (x1, y1, x2, y2, text) in self._cells:
+            if x1 <= e.x <= x2 and y1 <= e.y <= y2:
+                tip = text
+                break
+        if tip:
+            self._show_tip(tip, e.x_root, e.y_root)
+        else:
+            self._hide_tip()
+
+    def _show_tip(self, text, x, y):
+        if self._tip is None:
+            self._tip = tk.Toplevel(self.root)
+            self._tip.overrideredirect(True)
+            self._tip.attributes("-topmost", True)
+            self._tip_label = tk.Label(self._tip, justify="left", bg="#0b0d10", fg=TEXT,
+                                       font=self.f_small, padx=self.S(8), pady=self.S(5),
+                                       bd=0, highlightthickness=1, highlightbackground=BORDER)
+            self._tip_label.pack()
+        if text != self._tip_text:
+            self._tip_label.config(text=text, font=self.f_small)
+            self._tip_text = text
+        try:
+            self._tip.deiconify()
+            self._tip.geometry(f"+{int(x) + self.S(14)}+{int(y) + self.S(16)}")
+        except Exception:
+            pass
+
+    def _hide_tip(self):
+        self._tip_text = None
+        if self._tip is not None:
+            try:
+                self._tip.withdraw()
+            except Exception:
+                pass
 
     # ---------- ドラッグ(移動 / 右下でリサイズ) ----------
     def _in_resize_grip(self, e):
@@ -1307,10 +1484,16 @@ class UsageWidget:
         return e.x >= self.W - g and e.y >= self._H - g
 
     def _drag_start(self, e):
-        self._mode = "resize" if self._in_resize_grip(e) else "move"
+        resize = self._in_resize_grip(e)
+        if not resize and self.cfg.get("locked"):
+            self._mode = "locked"
+            return
+        self._mode = "resize" if resize else "move"
         self._sx, self._sy, self._sw = e.x_root, e.y_root, self.W
 
     def _drag_move(self, e):
+        if self._mode == "locked":
+            return
         if self._mode == "resize":
             new_w = self._sw + (e.x_root - self._sx)
             us = new_w / (self.dpi * self.BASE_W)
@@ -1367,17 +1550,43 @@ class UsageWidget:
         zoom.add_command(label="縮小 (−)", command=lambda: self.zoom(-0.1))
         zoom.add_command(label="等倍に戻す", command=self.zoom_reset)
         m.add_cascade(label=f"表示倍率（現在 {self.user_scale:.1f}x）", menu=zoom)
+        lockmark = "✓ " if self.cfg.get("locked") else "　"
+        m.add_command(label=f"{lockmark}位置をロック", command=self.toggle_lock)
         m.add_command(label="設定…", command=self.open_settings)
         m.add_command(label="設定ファイルを開く", command=self.open_config_file)
         if os.name == "nt":
             mark = "✓ " if startup_enabled() else "　"
             m.add_command(label=f"{mark}Windows起動時に自動実行", command=self.toggle_startup)
         m.add_separator()
+        m.add_command(label=f"バージョン情報 (v{APP_VERSION})", command=self.show_about)
         m.add_command(label="終了", command=self.quit)
         try:
             m.tk_popup(e.x_root, e.y_root)
         finally:
             m.grab_release()
+
+    def toggle_lock(self):
+        self.cfg["locked"] = not self.cfg.get("locked", False)
+        save_config(self.cfg)
+
+    def show_about(self):
+        win = tk.Toplevel(self.root)
+        win.title("バージョン情報")
+        win.configure(bg=CARD)
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+        f1 = tkfont.Font(family=UIF(), size=-self.S(15), weight="bold")
+        f2 = tkfont.Font(family=UIF(), size=-self.S(11))
+        tk.Label(win, text="AI Usage Widget", bg=CARD, fg=TEXT, font=f1).pack(
+            padx=self.S(20), pady=(self.S(14), self.S(2)))
+        tk.Label(win, text=f"v{APP_VERSION}", bg=CARD, fg=MUTED, font=f2).pack()
+        tk.Label(win, text="非公式 / MIT License\nClaude・ChatGPT・カスタムAIの利用枠を表示",
+                 bg=CARD, fg=FAINT, font=f2, justify="center").pack(padx=self.S(20), pady=self.S(8))
+        tk.Button(win, text="閉じる", command=win.destroy, bg=CARD_HEAD, fg=TEXT,
+                  relief="flat", font=f2, cursor="hand2", activebackground=BORDER).pack(
+            pady=(0, self.S(14)))
+        px0, py0 = self.root.winfo_x(), self.root.winfo_y()
+        win.geometry(f"+{px0 + self.S(20)}+{py0 + self.S(30)}")
 
     def test_claude(self, pcfg=None):
         win = tk.Toplevel(self.root)
@@ -1481,9 +1690,40 @@ class UsageWidget:
                 results = self.q.get_nowait()
                 self.fetching = False
                 self._render(self._merge(results))
+                self._handle_retry(results)
         except queue.Empty:
             pass
         self.root.after(300, self._poll_queue)
+
+    @staticmethod
+    def _is_retryable(err):
+        e = str(err or "")
+        good = ("通信", "timeout", "タイム", "Cloudflare", "一時", "取得失敗", "接続", "HTTP 5")
+        bad = ("未設定", "未ログイン", "無効", "認証", "見つから", "JSON", "value_path", "URL未設定")
+        if any(b in e for b in bad):
+            return False
+        return any(g in e for g in good)
+
+    def _handle_retry(self, results):
+        # 一時的な失敗(ネットワーク/Cloudflare等)があれば、通常間隔より早く再取得する。
+        # 未設定/認証エラー等の恒久的失敗では再試行しない(無駄打ち防止)。
+        if self._retry_after is not None:
+            try:
+                self.root.after_cancel(self._retry_after)
+            except Exception:
+                pass
+            self._retry_after = None
+        retryable = any((not p.get("ok")) and self._is_retryable(p.get("error", "")) for p in results)
+        if retryable:
+            self._backoff = 15 if self._backoff <= 0 else min(self._backoff * 2, 120)
+            self._retry_after = self.root.after(int(self._backoff * 1000), self._retry)
+        else:
+            self._backoff = 0
+
+    def _retry(self):
+        self._retry_after = None
+        if not self.fetching:
+            self.refresh()
 
     # ---------- キャッシュ ----------
     def _merge(self, results):
@@ -1492,6 +1732,15 @@ class UsageWidget:
         for prov in results:
             label = prov.get("label", "?")
             if prov.get("ok"):
+                # リセット秒を絶対時刻に変換(毎分の再描画でライブに減算するため)
+                wins = []
+                for w in prov.get("windows", []):
+                    nw = dict(w)
+                    rs = nw.get("reset_s")
+                    if rs is not None:
+                        nw["reset_at"] = now + rs
+                    wins.append(nw)
+                prov = {**prov, "windows": wins}
                 self.cache[label] = prov
                 self.cache_ts[label] = now
                 self.cfg.setdefault("cache", {})[label] = {
@@ -1536,6 +1785,19 @@ class UsageWidget:
     def _short_name(name):
         return {"週(Opus)": "Opus", "24時間": "24h", "セッション": "Sess"}.get(name, name)
 
+    def _fit_text(self, text, font, maxw):
+        if maxw <= 0:
+            return ""
+        try:
+            if font.measure(text) <= maxw:
+                return text
+            s = text
+            while s and font.measure(s + "…") > maxw:
+                s = s[:-1]
+            return (s + "…") if s else "…"
+        except Exception:
+            return text
+
     def _ring(self, cx, cy, d, thick, remaining, col, center_text, draw_arc=True):
         c = self.canvas
         x1, y1, x2, y2 = cx - d / 2, cy - d / 2, cx + d / 2, cy + d / 2
@@ -1554,6 +1816,7 @@ class UsageWidget:
     # display: プロバイダ dict のリスト / [](両方無効) / None(初期・読み込み中)
     def _render(self, display):
         self._last_display = display
+        self._cells = []
         c = self.canvas
         c.delete("content")
         c.delete("bg")
@@ -1566,7 +1829,12 @@ class UsageWidget:
         now_below = set()
 
         y = self.S(12)
-        c.create_text(pad, y, text="AI 利用枠", anchor="w", fill=TEXT,
+        # 先頭にステータスドット用の余白を確保し、タイトルはボタン手前で自動的に切り詰める
+        title_x = pad + self.S(13)
+        btn_left = W - self.S(10) - len(self.buttons) * self.S(22)
+        avail = btn_left - self.S(8) - title_x
+        title = self._fit_text("AI 利用枠", self.f_title, avail)
+        c.create_text(title_x, y, text=title, anchor="w", fill=TEXT,
                       font=self.f_title, tags="content")
         y += self.S(21)
 
@@ -1591,8 +1859,7 @@ class UsageWidget:
                 c.create_oval(pad, cy - rdot, pad + 2 * rdot, cy + rdot, fill=dot,
                               outline="", tags="content")
                 tx = pad + 2 * rdot + self.S(8)
-                c.create_text(tx, cy, text=prov["label"], anchor="w",
-                              fill=(MUTED if stale else TEXT), font=self.f_prov, tags="content")
+                name_maxw = (W - pad) - tx
                 if prov.get("plan"):  # プラン名を小さなピル(角丸チップ)で右寄せ
                     ptxt = str(prov["plan"])
                     pw = self.f_small.measure(ptxt)
@@ -1602,6 +1869,10 @@ class UsageWidget:
                                      fill=PILL_BG, outline="")
                     c.create_text((cx1 + cx2) / 2, cy, text=ptxt, anchor="center",
                                   fill=MUTED, font=self.f_small, tags="content")
+                    name_maxw = cx1 - self.S(8) - tx
+                c.create_text(tx, cy, text=self._fit_text(prov["label"], self.f_prov, name_maxw),
+                              anchor="w", fill=(MUTED if stale else TEXT), font=self.f_prov,
+                              tags="content")
                 y += self.S(22)
 
                 if not prov.get("ok"):
@@ -1642,11 +1913,26 @@ class UsageWidget:
                     label = win.get("cell_label") or self._short_name(win["name"])
                     c.create_text(cx, row_top + d + self.S(7), text=label, anchor="center",
                                   fill=MUTED, font=self.f_small, tags="content")
-                    # リセット(小)
-                    reset_txt = "" if stale else human_duration(win.get("reset_s"))
+                    # リセット(小・ライブ減算)
+                    if "reset_at" in win:
+                        rsec = win["reset_at"] - time.time()
+                    else:
+                        rsec = win.get("reset_s")
+                    if rsec is not None and rsec < 0:
+                        rsec = 0
+                    reset_txt = "" if stale else human_duration(rsec)
                     if reset_txt:
                         c.create_text(cx, row_top + d + self.S(17), text="⟳" + reset_txt,
                                       anchor="center", fill=FAINT, font=self.f_ringsub, tags="content")
+                    # ホバー用の正確な数値ツールチップ
+                    tip = f"{prov['label']} · {win['name']}\n"
+                    tip += (win.get("display") or f"残り {remaining:.0f}%")
+                    if not stale and "reset_at" in win and rsec:
+                        clock = datetime.fromtimestamp(win["reset_at"]).strftime("%m/%d %H:%M")
+                        tip += f"\nリセット {clock}頃"
+                    elif stale:
+                        tip += "\n(更新失敗・前回値)"
+                    self._cells.append((x, row_top, x + cell_w, row_top + cell_h, tip))
                     x += cell_w
                 y = row_top + cell_h
 
@@ -1672,23 +1958,24 @@ class UsageWidget:
                       fill=FAINT, font=self.f_small, tags="content")
         H = y + self.S(20)
 
-        # ヘッダのタイトル横に「全体の健康状態」ドット
+        # 先頭の「全体の健康状態」ドット(タイトルの左)
         acc = remaining_color(worst, low) if worst is not None else "#5b6472"
-        tw = self.f_title.measure("AI 利用枠")
         hd = self.S(4)
-        c.create_oval(pad + tw + self.S(10), self.S(12) - hd, pad + tw + self.S(10) + 2 * hd,
-                      self.S(12) + hd, fill=acc, outline="", tags="content")
+        dcx = pad + self.S(4)
+        c.create_oval(dcx - hd, self.S(12) - hd, dcx + hd, self.S(12) + hd,
+                      fill=acc, outline="", tags="content")
 
-        # 背景(カード→ヘッダ帯→ガラスのハイライト→アクセント線)を最背面へ
-        r = self.S(14)
+        # 背景(カード→ヘッダ帯→ガラスのハイライト→区切り線)を最背面へ
+        r = self.S(16)
         head_h = self.S(34)
         self._round_rect(0, 0, W - 1, H - 1, r, tag="bg", fill=CARD, outline=BORDER, width=1)
         self._round_rect(1, 1, W - 2, head_h, r, tag="bg", fill=CARD_HEAD, outline="")
         c.create_rectangle(1, head_h - r, W - 2, head_h, fill=CARD_HEAD, outline="", tags="bg")
         # 上端の薄いハイライト(ガラス感)
-        c.create_line(r, 1, W - 1 - r, 1, fill=_lighten(CARD_HEAD, 0.4),
+        c.create_line(r, 1, W - 1 - r, 1, fill=_lighten(CARD_HEAD, 0.45),
                       width=max(1, self.S(1)), tags="bg")
-        c.create_rectangle(0, head_h, W, head_h + max(2, self.S(2)), fill=acc, outline="", tags="bg")
+        # ヘッダ下は控えめな1px区切り(色のステータスはタイトル横のドットで表現)
+        c.create_line(0, head_h, W, head_h, fill=DIVIDER, width=max(1, self.S(1)), tags="bg")
         c.tag_lower("bg")
 
         # リサイズ用グリップ(右下) — ドラッグで拡大縮小(ベクター再描画=画質維持)
@@ -1714,6 +2001,16 @@ class UsageWidget:
         self.cfg["window"]["x"] = self.root.winfo_x()
         self.cfg["window"]["y"] = self.root.winfo_y()
         save_config(self.cfg)
+        if self._retry_after is not None:
+            try:
+                self.root.after_cancel(self._retry_after)
+            except Exception:
+                pass
+        if self._tip is not None:
+            try:
+                self._tip.destroy()
+            except Exception:
+                pass
         self.root.destroy()
 
 
@@ -1736,9 +2033,9 @@ class SettingsDialog:
         top.attributes("-topmost", True)
         top.resizable(False, False)
 
-        f_lbl = tkfont.Font(family="Segoe UI", size=-px(13), weight="bold")
-        f_txt = tkfont.Font(family="Segoe UI", size=-px(12))
-        f_hint = tkfont.Font(family="Segoe UI", size=-px(10))
+        f_lbl = tkfont.Font(family=UIF(), size=-px(13), weight="bold")
+        f_txt = tkfont.Font(family=UIF(), size=-px(12))
+        f_hint = tkfont.Font(family=UIF(), size=-px(10))
         pad = {"padx": px(16)}
 
         def section(text):
@@ -1823,6 +2120,22 @@ class SettingsDialog:
         self.v_sound = tk.BooleanVar(value=self.cfg.get("alert_sound", True))
         check("しきい値を下回ったら音で知らせる（Windows）", self.v_sound)
 
+        oprow = tk.Frame(top, bg=CARD)
+        oprow.pack(fill="x", **pad)
+        tk.Label(oprow, text="透明度", bg=CARD, fg=MUTED, font=f_txt).pack(side="left")
+        self.v_opacity = tk.IntVar(value=int(round(float(self.cfg.get("opacity", 1.0)) * 100)))
+
+        def on_opacity(_=None):
+            try:
+                self.app.root.attributes("-alpha", max(0.4, self.v_opacity.get() / 100.0))
+            except Exception:
+                pass
+        tk.Scale(oprow, from_=40, to=100, orient="horizontal", variable=self.v_opacity,
+                 command=on_opacity, bg=CARD, fg=MUTED, troughcolor=FIELD, highlightthickness=0,
+                 bd=0, sliderrelief="flat", length=px(160), font=f_hint,
+                 activebackground=GREEN).pack(side="left", padx=px(8))
+        tk.Label(oprow, text="%", bg=CARD, fg=FAINT, font=f_hint).pack(side="left")
+
         btns = tk.Frame(top, bg=CARD)
         btns.pack(fill="x", pady=px(16), **pad)
         tk.Button(btns, text="保存", command=self.save, bg=GREEN, fg="#0b0d10",
@@ -1842,6 +2155,8 @@ class SettingsDialog:
 
     def close(self):
         self.app._settings_win = None
+        # キャンセル時はライブプレビューした透明度を保存値に戻す
+        self.app._apply_opacity()
         try:
             self.top.destroy()
         except Exception:
@@ -1875,7 +2190,7 @@ class SettingsDialog:
         dlg.configure(bg=CARD)
         dlg.attributes("-topmost", True)
         s = self.app.scale
-        f = tkfont.Font(family="Segoe UI", size=-int(round(12 * s)))
+        f = tkfont.Font(family=UIF(), size=-int(round(12 * s)))
         msg = tk.StringVar(value="ブラウザを起動しています…")
         tk.Label(dlg, textvariable=msg, bg=CARD, fg=TEXT, font=f, wraplength=int(300 * s),
                  justify="left", anchor="w").pack(fill="both", expand=True,
@@ -1989,6 +2304,7 @@ class SettingsDialog:
         self.cfg["refresh_minutes"] = to_int(self.v_interval.get(), 5, 1, 180)
         self.cfg["low_threshold_pct"] = to_int(self.v_thr.get(), 20, 1, 99)
         self.cfg["alert_sound"] = bool(self.v_sound.get())
+        self.cfg["opacity"] = max(0.4, min(1.0, self.v_opacity.get() / 100.0))
         self.close()
         self.app.apply_settings()
 
@@ -2018,9 +2334,9 @@ class CustomProviderEditor:
         top.configure(bg=CARD)
         top.attributes("-topmost", True)
         top.resizable(False, False)
-        f_lbl = tkfont.Font(family="Segoe UI", size=-px(12), weight="bold")
-        f_txt = tkfont.Font(family="Segoe UI", size=-px(12))
-        f_hint = tkfont.Font(family="Segoe UI", size=-px(10))
+        f_lbl = tkfont.Font(family=UIF(), size=-px(12), weight="bold")
+        f_txt = tkfont.Font(family=UIF(), size=-px(12))
+        f_hint = tkfont.Font(family=UIF(), size=-px(10))
         pad = {"padx": px(14)}
 
         def field(label, initial, width=42, show=None):

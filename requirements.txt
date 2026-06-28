@@ -1,4 +1,15 @@
-requests>=2.32.0
-browser_cookie3>=0.20.1
-curl_cffi>=0.7.0
-rookiepy>=0.5.6
+# Required
+requests>=2.28
+
+# Recommended (reads browser cookies; helps Claude auto sessionKey on Firefox/older Chrome)
+browser_cookie3>=0.19
+
+# Optional but recommended:
+#   curl_cffi -> uses Chrome-compatible TLS behavior for more reliable Claude requests
+#   rookiepy  -> broader browser cookie reading for "Auto" sessionKey
+# The app runs without these; install for best results.
+curl_cffi>=0.6
+rookiepy>=0.5
+
+# Build only (not needed just to run):
+#   pyinstaller   (build.bat installs this for you)

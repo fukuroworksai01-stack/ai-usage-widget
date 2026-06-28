@@ -18,7 +18,9 @@ echo       (optional) installing curl_cffi / rookiepy for better Claude support.
 python -m pip install curl_cffi rookiepy >nul 2>nul
 
 set "ICON_OPT="
+set "ICON_DATA="
 if exist icon.ico set "ICON_OPT=--icon icon.ico"
+if exist icon.ico set "ICON_DATA=--add-data icon.ico;."
 
 rem Bundle optional libs into the EXE only if they are installed
 set "COLLECT="
@@ -28,7 +30,7 @@ python -c "import rookiepy" >nul 2>nul && set "COLLECT=%COLLECT% --collect-all r
 
 echo.
 echo [2/3] Building EXE. First run takes a few minutes...
-python -m PyInstaller --noconfirm --onefile --windowed --name AIUsageWidget %ICON_OPT%%COLLECT% ai_usage_widget.py
+python -m PyInstaller --noconfirm --onefile --windowed --name AIUsageWidget %ICON_OPT% %ICON_DATA%%COLLECT% ai_usage_widget.py
 if errorlevel 1 goto BUILDFAIL
 
 echo.
